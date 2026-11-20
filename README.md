@@ -88,17 +88,23 @@ bad = [c for c in re.findall(r'\[(\d\d:\d\d)\] (\w+)', doc) if c not in spk]
 
 ## Iterações e ajustes
 
-Foram **4 ciclos principais**: extração, geração, revisão crítica contra código e transcrição, e auditoria automatizada. Os ajustes concretos:
+Trabalhei em **3 ciclos principais**: (1) leitura do código e extração das decisões da transcrição; (2) geração dos documentos na ordem ADRs, RFC, FDD, PRD e tracker, com revisão de cada trecho contra a fonte antes de fechá-lo; (3) auditoria automatizada do pacote pronto, seguida de correções.
 
-1. **Contagem de tentativas ambígua.** A primeira leitura gerava "5 tentativas no total". Somando os intervalos 1m+5m+30m+2h+12h dá ~14,6 h, que bate com "quase 15 horas entre primeira falha e última tentativa" ([09:17] Diego). Isso só fecha com **envio inicial + 5 retentativas**, mas o resumo ([09:48] Larissa) diz "total 5 tentativas". Em vez de escolher em silêncio, o FDD adota a leitura que fecha a conta, e a divergência virou a questão em aberto **RFC-Q-06**.
-2. **Limite de 64 KB no lugar errado.** A versão inicial validava o tamanho em `publishWebhookEvent`, dentro da transação. Na revisão ficou claro que isso faria uma mudança de status sofrer rollback por causa de um webhook, o que contradiz [09:04] Bruno ("dá rollback na mudança de status? Não dá."). A checagem foi movida para o worker, que manda direto para a DLQ com `WEBHOOK_PAYLOAD_TOO_LARGE`.
-3. **`customer_id` do JWT.** A extração inicial pegou "customer_id implícito do JWT" ([09:31] Marcos), mas a fala foi revertida um minuto depois ([09:32] Larissa). A posição final (body ou path) não foi decidida, então virou **RFC-Q-04**, e o FDD marca sua escolha como proposta.
-4. **Código de erro que o cliente nunca veria.** O primeiro FDD dizia que URL `http` retornaria `400 WEBHOOK_INVALID_URL`. Lendo `src/middlewares/validate.middleware.ts`, todo `ZodError` vira `VALIDATION_ERROR`. Como a Sofia pediu a validação no schema Zod ([09:23] Sofia), a matriz de erros passou a descrever o comportamento real: o código `WEBHOOK_*` vai em `details[].message`. A alternativa ficou registrada.
-5. **Observabilidade inventada.** O rascunho citava Prometheus e OpenTelemetry. `package.json` só tem Pino. A seção foi reescrita: métricas derivadas de logs e de queries nas tabelas, tracing por correlação de `eventId`, e nenhuma dependência nova, coerente com [09:29] Bruno.
-6. **Evento na criação do pedido.** A IA incluiu `OrderService.create` como gerador de evento. A reunião só fala de `changeStatus` ([09:40] Bruno), e `order.status.ts` mostra que nenhuma transição leva a `PENDING`. O item virou exclusão explícita, e `PENDING` passou a ser recusado no filtro de eventos.
-7. **Inconsistência entre ADR-007 e FDD.** O ADR dizia que desativar um webhook não afetava eventos enfileirados, e o FDD mandava esses eventos para a DLQ. O ADR foi corrigido para delegar o tratamento ao FDD.
-8. **Cobertura do tracker abaixo da meta.** A auditoria automática mostrou **75%** de cobertura de IDs: faltavam critérios de aceite e 8 erros da matriz. Foram adicionadas 32 linhas e a cobertura chegou a **100%** (130/130 IDs). Também confirmou 0 citações inválidas e 0 caminhos inexistentes.
-9. **Detalhe não decidido tratado como fato.** Lote de 10, caminho `/rotate-secret`, duas assinaturas no `X-Signature` durante a rotação, recuperação de linhas `PROCESSING` e outros detalhes não foram decididos na reunião. Esses 14 itens foram rotulados `H-01` a `H-14` no FDD e ficaram fora do tracker de propósito.
+**O que a auditoria final pegou nos documentos já escritos**
+
+1. **Cobertura do tracker abaixo da meta.** O script de auditoria mediu **75%** de cobertura: os critérios de aceite do PRD e do FDD e 8 códigos da matriz de erros não tinham linha no tracker. Adicionei 32 linhas, cada uma ligada a uma fala ou a um arquivo, e a cobertura foi para **100%** (130/130 IDs). A mesma rodada confirmou 0 citações `[hh:mm] Nome` inválidas e 0 caminhos de arquivo inexistentes.
+2. **ADR contradizendo o FDD.** O ADR-007 dizia que desativar um webhook não afetava eventos já enfileirados. O FDD manda esses eventos para a DLQ com `WEBHOOK_INACTIVE`. Ajustei o ADR para registrar só o que foi decidido (mudança de filtro não afeta o que já está na outbox) e deixar o tratamento de webhooks inativos para o FDD.
+3. **Texto confuso no fluxo de criação do evento.** O passo sobre o log `webhook_event_enqueued` no FDD estava mal formulado. Reescrevi deixando explícito que o log é emitido dentro da transação, pode aparecer mesmo com rollback, e que a fonte de verdade é a tabela.
+
+**O que a revisão contra a transcrição e o código mudou durante a geração**
+
+4. **Contagem de tentativas ambígua.** O resumo da reunião diz "total 5 tentativas" ([09:48] Larissa). Mas os intervalos 1m+5m+30m+2h+12h somam ~14,6 h, que só bate com "quase 15 horas entre primeira falha e última tentativa" ([09:17] Diego) se forem envio inicial + 5 retentativas. Não escolhi em silêncio: o FDD usa a leitura que fecha a conta e a divergência virou a questão em aberto **RFC-Q-06**.
+5. **Onde validar o limite de 64 KB.** Validar dentro de `publishWebhookEvent` faria uma mudança de status sofrer rollback por causa de um webhook, o que contraria [09:04] Bruno. A checagem ficou no worker, que manda o evento direto para a DLQ com `WEBHOOK_PAYLOAD_TOO_LARGE`.
+6. **`customer_id` vindo do JWT.** A fala de [09:31] Marcos diz que viria do JWT, mas foi revertida em [09:32] Larissa, sem decidir entre body e path. Virou **RFC-Q-04**, e o formato do FDD está marcado como proposta.
+7. **Código de erro que o cliente realmente recebe.** `src/middlewares/validate.middleware.ts` transforma todo `ZodError` em `VALIDATION_ERROR`. Como a validação de `https` fica no schema Zod ([09:23] Sofia), a matriz de erros descreve esse comportamento real: `WEBHOOK_INVALID_URL` aparece em `details[].message`, não no topo da resposta.
+8. **Observabilidade sem stack inventada.** `package.json` só tem Pino, sem Prometheus nem OpenTelemetry. A seção usa métricas derivadas de logs e de consultas às tabelas e tracing por correlação de `eventId`, sem dependência nova ([09:29] Bruno).
+9. **Evento na criação do pedido.** A reunião só fala de `changeStatus` ([09:40] Bruno), e `src/modules/orders/order.status.ts` mostra que nenhuma transição leva a `PENDING`. A criação do pedido ficou como exclusão explícita, e `PENDING` é recusado no filtro de eventos.
+10. **Decisões não tomadas.** Tamanho do lote, caminho do endpoint de rotação, formato do `X-Signature` durante a rotação e outros detalhes não foram decididos na reunião. Em vez de apresentá-los como fato, rotulei 14 itens como hipóteses `H-01` a `H-14` no FDD e os deixei fora do tracker de propósito.
 
 ## Como navegar a entrega
 
